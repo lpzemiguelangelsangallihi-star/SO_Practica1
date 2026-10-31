@@ -1,0 +1,112 @@
+
+import threading
+import queue
+import time
+import random
+
+NUM_DOCUMENTOS = 24
+NUM_TRABAJADORES = 4
+FACTOR_TIEMPO = 0.1  # segundos de simulación por unidad de tamaño
+
+
+def cargar_cola():
+    """Crea la cola compartida con 24 documentos (id, tamaño simulado)."""
+    cola = queue.Queue()
+    documentos = [(doc_id, random.randint(1, 5)) for doc_id in range(1, NUM_DOCUMENTOS + 1)]
+    for doc in documentos:
+        cola.put(doc)
+    return cola, documentos
+
+
+def trabajador(nombre, trabajos, resultados, registro, lock):
+    """Retira documentos de la cola hasta que esté vacía y los 'procesa'."""
+    while True:
+        try:
+            # get_nowait() es atómico respecto a otros hilos: cada documento
+            # sale de la cola una sola vez. No se usa empty() como condición.
+            doc_id, tamano = trabajos.get_nowait()
+        except queue.Empty:
+            break  # cola vacía: terminación controlada
+
+        time.sleep(tamano * FACTOR_TIEMPO)  # simula el procesamiento
+
+        # Sección crítica: actualización del estado compartido
+        with lock:
+            resultados[nombre]["docs"] += 1
+            resultados[nombre]["tamano"] += tamano
+            registro.append((doc_id, nombre))
+        trabajos.task_done()
+
+
+def ejecutar_con_hilos(documentos_cola):
+    resultados = {f"Trabajador-{i}": {"docs": 0, "tamano": 0}
+                  for i in range(1, NUM_TRABAJADORES + 1)}
+    registro = []
+    lock = threading.Lock()
+
+    hilos = [threading.Thread(target=trabajador,
+                              args=(nombre, documentos_cola, resultados, registro, lock),
+                              name=nombre)
+             for nombre in resultados]
+
+    inicio = time.perf_counter()
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    duracion = time.perf_counter() - inicio
+    return resultados, registro, hilos, duracion
+
+
+def ejecutar_secuencial(documentos):
+    inicio = time.perf_counter()
+    for _, tamano in documentos:
+        time.sleep(tamano * FACTOR_TIEMPO)
+    return time.perf_counter() - inicio
+
+
+def main():
+    cola, documentos = cargar_cola()
+    print(f"Se cargaron {len(documentos)} documentos en la cola "
+          f"(tamaño total simulado: {sum(t for _, t in documentos)})")
+    print(f"Iniciando {NUM_TRABAJADORES} trabajadores...\n")
+
+    resultados, registro, hilos, t_hilos = ejecutar_con_hilos(cola)
+
+    # ---- Resumen -------------------------------------------------------
+    total = sum(r["docs"] for r in resultados.values())
+    print("=" * 52)
+    print("RESUMEN POR TRABAJADOR")
+    print("=" * 52)
+    print(f"{'Trabajador':<14}{'Documentos':>12}{'Tamaño acumulado':>22}")
+    for nombre, r in resultados.items():
+        print(f"{nombre:<14}{r['docs']:>12}{r['tamano']:>22}")
+    print("-" * 52)
+    print(f"{'TOTAL':<14}{total:>12}{sum(r['tamano'] for r in resultados.values()):>22}")
+
+    # ---- Asignación detallada de los 24 documentos ---------------------
+    print("\nASIGNACIÓN DE DOCUMENTOS (orden de procesamiento)")
+    for nombre in resultados:
+        asignados = [d for d, n in registro if n == nombre]
+        print(f"  {nombre}: {asignados}")
+
+    # ---- Verificaciones -----------------------------------------------
+    ids = [d for d, _ in registro]
+    v1 = total == NUM_DOCUMENTOS
+    v2 = len(ids) == len(set(ids)) == NUM_DOCUMENTOS and set(ids) == set(range(1, 25))
+    v3 = all(not h.is_alive() for h in hilos) and cola.empty()
+    print("\nVERIFICACIONES")
+    print(f"  1. Suma de documentos por trabajador = {NUM_DOCUMENTOS}: {'OK' if v1 else 'FALLO'}")
+    print(f"  2. Cada ID procesado exactamente una vez:        {'OK' if v2 else 'FALLO'}")
+    print(f"  3. Los 4 hilos terminaron sin bloquearse:        {'OK' if v3 else 'FALLO'}")
+
+    # ---- Reto: comparación secuencial vs hilos -------------------------
+    t_sec = ejecutar_secuencial(documentos)
+    print("\nRETO: COMPARACIÓN DE TIEMPOS")
+    print(f"  Versión secuencial : {t_sec:.2f} s")
+    print(f"  Versión 4 hilos    : {t_hilos:.2f} s")
+    print(f"  Aceleración        : {t_sec / t_hilos:.2f}x")
+
+
+if __name__ == "__main__":
+    main()
